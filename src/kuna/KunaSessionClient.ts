@@ -73,9 +73,13 @@ import {
   type KunaProjectFileSpan,
 } from "./KunaProjectReader.js";
 import { kunaUnavailable } from "./KunaUnavailable.js";
-import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
+import {
+  RegularFileCleanupFailure,
+  regularFileCancellation,
+} from "../filesystem/OwnedRegularFile.js";
 import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
+import { analysisClientFailureForOperation } from "../providers/AnalysisClientFailure.js";
 
 /** How often a request waiting on the project export reports that it still waits. */
 const WAIT_PROGRESS_INTERVAL_MS = 10_000;
@@ -355,7 +359,16 @@ export class KunaSessionClient implements AnalysisClient {
         ),
       );
     const installation = await this.#ensureInstallation();
-    if (!installation.ok) return installation;
+    if (!installation.ok)
+      return operation === "health"
+        ? installation
+        : err(
+            analysisClientFailureForOperation(
+              installation.error,
+              KUNA_PROVIDER_ID,
+              operation,
+            ),
+          );
     try {
       if (operation === "health")
         return ok(
@@ -1331,12 +1344,18 @@ export class KunaSessionClient implements AnalysisClient {
           );
         return ok(inspected.value);
       } catch (cause: unknown) {
+        const cancellation = regularFileCancellation(cause);
+        if (
+          !(cause instanceof RegularFileCleanupFailure) &&
+          cancellation !== undefined
+        )
+          return err(
+            new AnalysisCancelledError("health", {
+              cause: cancellation.reason,
+            }),
+          );
         if (!(cause instanceof RegularFileCleanupFailure)) throw cause;
-        const error = kunaFileCleanupError(
-          cause,
-          "health",
-          this.#session.signal,
-        );
+        const error = kunaFileCleanupError(cause, "health");
         fileCloseScope.bindFailure(cause, error);
         return err(error);
       }
